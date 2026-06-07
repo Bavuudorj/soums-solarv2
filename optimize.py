@@ -123,12 +123,46 @@ def build_topology(comp_nodes, node_info, line_edges, grid: GridParams):
 # Нэг сүлжээний оновчлол
 # ---------------------------------------------------------------------------
 
+def _grid_only_result(comp, node_info, demand_rep, demand_w, econ, slack):
+    """Нарны станц байрлуулах боломжгүй (35кВ шугамгүй) сүлжээ — зөвхөн grid-ээс хангагдана."""
+    soum_codes = comp['soum_codes']
+    served = sum(demand_w[s] * node_info[c]['load_kw'] * demand_rep[s][t]
+                 for c in soum_codes for s in SEASONS for t in range(24))
+    annual_cost = econ.lambda_imp * served
+    sizing = {c: {'pv_kw': 0.0, 'batt_kwh': 0.0, 'batt_kw': 0.0} for c in soum_codes}
+    return {
+        'status': 'Grid-only', 'slack': slack, 'sizing': sizing,
+        'annual_cost': annual_cost, 'capex': 0.0,
+        'annual_import_kwh': served, 'annual_export_kwh': 0.0,
+        'annual_ens_kwh': 0.0, 'served_kwh': served,
+        'lcoe': (annual_cost / served) if served > 0 else None,
+        'total_pv_kw': 0.0, 'total_batt_kwh': 0.0, 'total_batt_kw': 0.0,
+    }
+
+
 def optimize_network(comp, node_info, line_edges, demand_rep, demand_w,
-                     solar_by_code, econ: EconParams, grid: GridParams):
+                     solar_by_code, econ: EconParams, grid: GridParams,
+                     pv_voltage_kv=35.0):
     comp_nodes = set(comp['nodes'])
     soum_codes = comp['soum_codes']
     slack, parent, children, subtree, branch, adj = build_topology(
         comp_nodes, node_info, line_edges, grid)
+
+    # ДҮРЭМ: нарны станцыг зөвхөн pv_voltage_kv (35 кВ)-ын шугаманд холбогдсон
+    # зангилаанд байрлуулна. Бусад зангилаа зөвхөн grid-импортоор хангагдана.
+    if pv_voltage_kv is None:
+        pv_nodes = set(soum_codes)
+    else:
+        pv_nodes = set()
+        for (a, b), (kv, ln) in line_edges.items():
+            if a in comp_nodes and b in comp_nodes and kv is not None \
+                    and abs(kv - pv_voltage_kv) < 1e-6:
+                pv_nodes.add(a)
+                pv_nodes.add(b)
+
+    # 35кВ шугамд холбогдсон ачаалалтай зангилаа байхгүй бол — зөвхөн grid
+    if not (pv_nodes & set(soum_codes)):
+        return _grid_only_result(comp, node_info, demand_rep, demand_w, econ, slack)
 
     # Grid импорт/экспортын хязгаар = slack-ийн хамгийн өндөр хүчдэлийн шугамын thermal
     grid_cap = 0.0
@@ -143,12 +177,14 @@ def optimize_network(comp, node_info, line_edges, demand_rep, demand_w,
     H = range(24)
     dU_max = grid.dU_max
 
-    # Хэмжээний хувьсагч (зөвхөн ачаалалтай зангилаа)
+    # Хэмжээний хувьсагч (зөвхөн ачаалалтай зангилаа).
+    # 35кВ-тэй холбоогүй зангилаанд PV/батарейг 0 (upBound=0) болгоно.
     xPV, EB, PB = {}, {}, {}
     for c in soum_codes:
-        xPV[c] = pulp.LpVariable(f"xpv_{c}", lowBound=0)
-        EB[c] = pulp.LpVariable(f"eb_{c}", lowBound=0)
-        PB[c] = pulp.LpVariable(f"pb_{c}", lowBound=0)
+        ub = None if c in pv_nodes else 0
+        xPV[c] = pulp.LpVariable(f"xpv_{c}", lowBound=0, upBound=ub)
+        EB[c] = pulp.LpVariable(f"eb_{c}", lowBound=0, upBound=ub)
+        PB[c] = pulp.LpVariable(f"pb_{c}", lowBound=0, upBound=ub)
 
     # Диспэтчийн хувьсагч
     g, pch, pdis, soc, ens = {}, {}, {}, {}, {}
@@ -233,6 +269,10 @@ def optimize_network(comp, node_info, line_edges, demand_rep, demand_w,
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     status = pulp.LpStatus[prob.status]
 
+    # Дүрмийн улмаас шийдэлгүй болбол — зөвхөн grid-ээс хангагдана гэж үзнэ
+    if status != 'Optimal':
+        return _grid_only_result(comp, node_info, demand_rep, demand_w, econ, slack)
+
     sizing = {}
     for c in soum_codes:
         sizing[c] = {
@@ -293,7 +333,8 @@ def build_line_edges(lines):
 
 
 def optimize_all(analysis, lines, demand_rep, demand_w, solar_by_code,
-                 econ: EconParams = None, grid: GridParams = None, progress=None):
+                 econ: EconParams = None, grid: GridParams = None, progress=None,
+                 pv_voltage_kv=35.0):
     if econ is None:
         econ = EconParams()
     if grid is None:
@@ -307,7 +348,7 @@ def optimize_all(analysis, lines, demand_rep, demand_w, solar_by_code,
     results = []
     for i, comp in enumerate(comps):
         res = optimize_network(comp, node_info, line_edges, demand_rep, demand_w,
-                               solar_by_code, econ, grid)
+                               solar_by_code, econ, grid, pv_voltage_kv=pv_voltage_kv)
         res['component'] = comp
         results.append(res)
         done_w += comp.get('soum_count', 1)
@@ -326,6 +367,7 @@ def optimize_all(analysis, lines, demand_rep, demand_w, solar_by_code,
         'total_ens_kwh': sum(r['annual_ens_kwh'] for r in results),
         'total_served_kwh': sum(r['served_kwh'] for r in results),
         'n_solved': sum(1 for r in results if r['status'] == 'Optimal'),
+        'n_grid_only': sum(1 for r in results if r['status'] == 'Grid-only'),
         'n_networks': len(results),
     }
     summary['system_lcoe'] = (summary['total_annual_cost'] / summary['total_served_kwh']

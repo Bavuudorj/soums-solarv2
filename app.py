@@ -176,6 +176,8 @@ with tab_detail:
 with tab_milp:
     st.markdown("**Block 3 — Цаг тутмын MILP оновчлол** (grid-холболттой, LinDistFlow, "
                 "4 улирлын төлөөлөх өдөр). PV/батарейн хэмжээ ба диспэтчийг нэгэн зэрэг оновчилно.")
+    st.caption("⚙️ Дүрэм: нарны станцыг зөвхөн **35 кВ шугаманд холбогдсон** зангилаанд "
+               "байрлуулна. 35 кВ-гүй сүлжээ зөвхөн grid-ээс хангагдана (Grid-only).")
     st.caption("Анхааруулга: бүх сүлжээг бодоход ~1.5 минут болдог. Үр дүн кэшлэгдэнэ.")
 
     if st.button("⚡ MILP оновчлол ажиллуулах", type="primary"):
@@ -206,7 +208,8 @@ with tab_milp:
         m1.metric("Жилийн нийт зардал", f"${ms['total_annual_cost']:,.0f}")
         m2.metric("Нийт CAPEX", f"${ms['total_capex']:,.0f}")
         m3.metric("Систем LCOE", f"${ms['system_lcoe']:.3f}/кВт·ц" if ms['system_lcoe'] else "—")
-        m4.metric("Шийдсэн сүлжээ", f"{ms['n_solved']}/{ms['n_networks']}")
+        m4.metric("Нар+батарейтай сүлжээ", f"{ms['n_solved']}/{ms['n_networks']}",
+                  help=f"Зөвхөн grid (35кВ-гүй): {ms.get('n_grid_only', 0)}")
         n1, n2, n3 = st.columns(3)
         n1.metric("Нийт PV", f"{ms['total_pv_kw']:,.0f} кВт")
         n2.metric("Нийт батарей", f"{ms['total_batt_kwh']:,.0f} кВт·ц")
