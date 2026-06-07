@@ -43,6 +43,19 @@ streamlit run app.py
 python generate_map.py        # mongolia_electricity_map.html үүснэ
 ```
 
+## Docker контейнер
+
+```bash
+# 1. Image байгуулах
+docker build -t soums-solar .
+
+# 2. Контейнер ажиллуулах (8501 порт)
+docker run -p 8501:8501 soums-solar
+```
+
+Дараа нь браузерт **http://localhost:8501** нээнэ. PuLP-ийн CBC солвер нь Linux
+wheel дотроо ирдэг тул нэмэлт системийн хамаарал шаардахгүй.
+
 ## Интернетэд байршуулах — Streamlit Community Cloud (үнэгүй)
 
 > Энэ хэсгийг та өөрөө GitHub болон Streamlit дансаараа хийнэ.

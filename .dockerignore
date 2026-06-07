@@ -1,0 +1,35 @@
+# Git / IDE
+.git/
+.gitignore
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Үүсгэсэн гаралт / кэш
+mongolia_electricity_map.html
+pvgis_cache.json
+*.log
+_test_*.py
+_check.py
+
+# Ашиглагдахгүй / нэмэлт файлууд (контейнерт шаардлагагүй)
+import os.py
+make_report.py
+*.docx
+papers/
+line.pdf
+Icon.jpeg
+icon.png
+Red_soums.xlsx
+lines.xlsx
+soums.xlsx
+lines11.xlsx
+lines12.xlsx
+soums_зассан.xlsx
+ЦДАШ_сүлжээ_цэг_шугам.xlsx
+Dockerfile
+.dockerignore
