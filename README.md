@@ -82,9 +82,14 @@ git push -u origin main
 
 | Файл | Үүрэг |
 |------|-------|
-| `app.py` | Streamlit веб интерфэйс |
-| `solar.py` | Нарны систем + батарей + өртгийн тооцоолол |
-| `network.py` | Өгөгдөл унших, граф, чадвараар хязгаарлагдсан оптимизаци |
+| `app.py` | Streamlit веб интерфэйс (газрын зураг, дэлгэрэнгүй, MILP, станц сонголт) |
+| `solar.py` | Нарны систем + батарей + өртгийн энгийн тооцоо (Load-factor) |
+| `capacity.py` | Шугамын нэвтрүүлэх чадвар (дулаан/хүчдэлийн уналт/SIL) |
+| `network.py` | Өгөгдөл унших, граф, төвлөрсөн/тархмал зөвлөмж |
+| `profiles.py` | Цаг тутмын эрэлтийн профайл (4 улирлын төлөөлөх өдөр) |
+| `pvgis.py` | PVGIS API-аас нарны үйлдвэрлэл + офлайн загвар |
+| `optimize.py` | Block 3 MILP оновчлол (grid + LinDistFlow) |
 | `mapbuilder.py` | Folium газрын зураг |
 | `generate_map.py` | Статик HTML гаргах CLI |
-| `soums.xlsx`, `lines.xlsx` | Эх өгөгдөл |
+| `soums_v2.xlsx`, `lines_v2.xlsx`, `soum_load_profile.xlsx` | Эх өгөгдөл |
+| `icon1.png` | Нарны станцын тэмдэглэгээний зураг |

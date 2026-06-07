@@ -1,8 +1,8 @@
 """
 Нарны систем + батарейн хэмжээ, өртгийн тооцоолол.
 
-Загвар: Хэрэглээ нь оргил чадал (кВт) бөгөөд өдөрт 24 цаг ажиллана гэж үзнэ.
-  Өдрийн эрчим хүч  E = load_kw * 24  (кВт·ц/өдөр)
+Загвар: Хэрэглээ нь оргил чадал (кВт). Өдрийн эрчмийг ачааллын коэф. (LF)-оор тооцно.
+  Өдрийн эрчим хүч  E = 24 * LF * load_kw  (кВт·ц/өдөр)   [LF = дундаж/оргил]
   Нарны чадал       PV_kWp = E / (PSH * PR)
   Батарей           Battery_kWh = E * autonomy / (DoD * batt_eff)
   Өртөг             тогтмол суурь зардал + (PV + батарей) * угсралтын коэф
@@ -20,7 +20,8 @@ class Assumptions:
     autonomy_days: float = 1.0       # Батарейн нөөц (нар байхгүй өдөр)
     battery_dod: float = 0.8         # Батарейн цэнэг ашиглах гүн (LiFePO4)
     battery_efficiency: float = 0.9  # Батарейн цэнэг/цэнэггүйжих ашиг
-    operating_hours: float = 24.0    # Ачаалал өдөрт хэдэн цаг ажиллах
+    operating_hours: float = 24.0    # Хоногийн цаг
+    load_factor: float = 0.35        # Ачааллын коэф. LF=дундаж/оргил (хөдөөгийн сум ~0.30–0.45)
     panel_wp: float = 550.0          # Нэг панелийн чадал, Вт
     panel_area_m2: float = 2.6       # Нэг панелийн талбай, м²
     cost_per_wp: float = 0.9         # PV өртөг, $/Вт
@@ -42,7 +43,9 @@ def size_solar_system(load_kw, a: Assumptions):
             'fixed_cost': 0.0, 'cost_total': 0.0,
         }
 
-    energy = load_kw * a.operating_hours                       # кВт·ц/өдөр
+    # Өдрийн эрчим хүч: оргил чадлыг ачааллын коэф.-оор хоногийн горимд шилжүүлнэ
+    #   E = 24 · LF · P_pk   (LF = дундаж/оргил)
+    energy = load_kw * a.operating_hours * a.load_factor       # кВт·ц/өдөр
     pv_kwp = energy / (a.psh * a.performance_ratio)            # кВт (DC оргил)
     battery_kwh = energy * a.autonomy_days / (a.battery_dod * a.battery_efficiency)
     panels = math.ceil(pv_kwp * 1000.0 / a.panel_wp)

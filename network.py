@@ -1,6 +1,9 @@
 """
-Өгөгдөл унших, цахилгаан сүлжээний граф байгуулах, нэвтрүүлэх чадварыг
-харгалзан "төвлөрсөн vs тараангуй" хангамжийн хамгийн бага зардлыг тооцоолох.
+Өгөгдөл унших (soums_v2 / lines_v2), цахилгаан сүлжээний граф байгуулах,
+шугамын нэвтрүүлэх чадварыг (хүчдэл+уртаас тооцоолсон) харгалзан
+"төвлөрсөн vs тараангуй" хангамжийн хамгийн бага зардлыг тооцоолох.
+
+Бүх дотоод тооцоо кВт нэгжээр явагдана (Ачаалал (МВт) -> ×1000 -> кВт).
 """
 
 import re
@@ -10,10 +13,11 @@ from collections import defaultdict, deque
 import pandas as pd
 
 from solar import Assumptions, size_solar_system
+from capacity import GridParams, line_capacity_kw
 
 
 # ---------------------------------------------------------------------------
-# Баганын нэр таних туслахууд
+# Баганын нэр таних
 # ---------------------------------------------------------------------------
 
 def normalize_key(text):
@@ -39,38 +43,54 @@ def pick_column(df, *candidates):
 
 
 def _code(value):
-    """Кодыг цэвэр мөр болгож буцаана (хоосон бол None)."""
     if value is None or pd.isna(value):
         return None
     s = str(value).strip()
     return s if s else None
 
 
+def parse_voltage(text):
+    """'10', '10 кВ', 10.0 зэргээс тоон утга (кВ) гаргана."""
+    if text is None or (isinstance(text, float) and pd.isna(text)):
+        return None
+    m = re.search(r'\d+(?:[.,]\d+)?', str(text))
+    return float(m.group().replace(',', '.')) if m else None
+
+
 # ---------------------------------------------------------------------------
-# Файл унших
+# Файл унших (v2 ба хуучин формат хоёуланг дэмжинэ)
 # ---------------------------------------------------------------------------
 
 def load_soums(path):
     df = pd.read_excel(path)
-    cols = {
-        'код': pick_column(df, 'Код'),
-        'аймаг': pick_column(df, 'Аймаг'),
-        'сум': pick_column(df, 'Сум'),
-        'төрөл': pick_column(df, 'Төрөл'),
-        'lat': pick_column(df, 'Өргөрөг'),
-        'lon': pick_column(df, 'Уртраг'),
-        'хэрэглээ_квт': pick_column(df, 'Хэрэглээ_кВт', 'Хэрэглээ кВт', 'Хэрэглээ'),
-    }
-    missing = [k for k in ('сум', 'lat', 'lon', 'хэрэглээ_квт') if cols[k] is None]
-    if missing:
-        raise ValueError(f"soums.xlsx-д дараах багана олдсонгүй: {missing}")
+    code_c = pick_column(df, 'Код')
+    aimag_c = pick_column(df, 'Аймаг')
+    name_c = pick_column(df, 'Цэгийн нэр', 'Сум', 'Нэр')
+    type_c = pick_column(df, 'Төрөл')
+    lat_c = pick_column(df, 'Өргөрөг (lat)', 'Өргөрөг')
+    lon_c = pick_column(df, 'Уртраг (lon)', 'Уртраг')
+    mw_c = pick_column(df, 'Ачаалал (МВт)', 'Ачаалал МВт', 'Ачаалал')
+    kw_c = pick_column(df, 'Хэрэглээ_кВт', 'Хэрэглээ кВт', 'Хэрэглээ')
+
+    if name_c is None or lat_c is None or lon_c is None:
+        raise ValueError("soums файлд нэр/координатын багана олдсонгүй.")
 
     out = pd.DataFrame()
-    for std, orig in cols.items():
-        out[std] = df[orig] if orig is not None else None
-    out['lat'] = pd.to_numeric(out['lat'], errors='coerce')
-    out['lon'] = pd.to_numeric(out['lon'], errors='coerce')
-    out['хэрэглээ_квт'] = pd.to_numeric(out['хэрэглээ_квт'], errors='coerce')
+    out['код'] = df[code_c] if code_c else None
+    out['аймаг'] = df[aimag_c] if aimag_c else None
+    out['сум'] = df[name_c]
+    out['төрөл'] = df[type_c] if type_c else None
+    out['lat'] = pd.to_numeric(df[lat_c], errors='coerce')
+    out['lon'] = pd.to_numeric(df[lon_c], errors='coerce')
+
+    # Ачаалал -> кВт (МВт байвал ×1000)
+    if mw_c is not None:
+        out['хэрэглээ_квт'] = pd.to_numeric(df[mw_c], errors='coerce') * 1000.0
+    elif kw_c is not None:
+        out['хэрэглээ_квт'] = pd.to_numeric(df[kw_c], errors='coerce')
+    else:
+        out['хэрэглээ_квт'] = float('nan')
+
     out = out.dropna(subset=['lat', 'lon']).reset_index(drop=True)
     return out
 
@@ -79,72 +99,86 @@ def load_lines(path):
     df = pd.read_excel(path)
     cols = {
         'эхлэл_код': pick_column(df, 'Эхлэл код'),
-        'дуусах_код': pick_column(df, 'Дуусах код'),
-        'эхлэл_нэр': pick_column(df, 'Сум', 'Эхлэл нэр'),
-        'дуусах_нэр': pick_column(df, 'Дуусах нэр'),
-        'эхлэл_lat': pick_column(df, 'Эхлэл_lat', 'Эхлэл lat'),
-        'эхлэл_lon': pick_column(df, 'Эхлэл_lon', 'Эхлэл lon'),
-        'дуусах_lat': pick_column(df, 'Дуусах_lat', 'Дуусах lat'),
-        'дуусах_lon': pick_column(df, 'Дуусах_lon', 'Дуусах lon'),
-        'урт_хэмжсэн': pick_column(df, 'Зургаас хэмжсэн урт (км)', 'Хэмжсэн урт'),
-        'урт_шулуун': pick_column(df, 'Шулууны урт (км)', 'Шулуун урт'),
-        'чадвар_мвт': pick_column(df, 'Чадвар_МВт', 'Чадвар МВт', 'Чадвар'),
-        'хүчдэл_кв': pick_column(df, 'Хүчдэл_кВ', 'Хүчдэл кВ', 'Хүчдэл_кВт', 'Хүчдэл'),
+        'дуусах_код': pick_column(df, 'Төгсгөл код', 'Дуусах код'),
+        'эхлэл_нэр': pick_column(df, 'Эхлэл нэр', 'Сум'),
+        'дуусах_нэр': pick_column(df, 'Төгсгөл нэр', 'Дуусах нэр'),
+        'эхлэл_lat': pick_column(df, 'Эхлэл өргөрөг', 'Эхлэл_lat', 'Эхлэл lat'),
+        'эхлэл_lon': pick_column(df, 'Эхлэл уртраг', 'Эхлэл_lon', 'Эхлэл lon'),
+        'дуусах_lat': pick_column(df, 'Төгсгөл өргөрөг', 'Дуусах_lat', 'Дуусах lat'),
+        'дуусах_lon': pick_column(df, 'Төгсгөл уртраг', 'Дуусах_lon', 'Дуусах lon'),
+        'урт': pick_column(df, 'Шулууны урт (км)', 'Зургаас хэмжсэн урт (км)', 'Урт'),
+        'хүчдэл_кв': pick_column(df, 'Хүчдэл (кВ)', 'Хүчдэл_кВ', 'Хүчдэл кВ', 'Хүчдэл'),
     }
     needed = ['эхлэл_lat', 'эхлэл_lon', 'дуусах_lat', 'дуусах_lon']
     missing = [k for k in needed if cols[k] is None]
     if missing:
-        raise ValueError(f"lines.xlsx-д дараах координатын багана олдсонгүй: {missing}")
+        raise ValueError(f"lines файлд координатын багана олдсонгүй: {missing}")
 
     out = pd.DataFrame()
     for std, orig in cols.items():
         out[std] = df[orig] if orig is not None else None
-    for c in ('эхлэл_lat', 'эхлэл_lon', 'дуусах_lat', 'дуусах_lon',
-              'урт_хэмжсэн', 'урт_шулуун', 'чадвар_мвт'):
+    for c in ('эхлэл_lat', 'эхлэл_lon', 'дуусах_lat', 'дуусах_lon', 'урт'):
         out[c] = pd.to_numeric(out[c], errors='coerce')
+    out['хүчдэл_num'] = out['хүчдэл_кв'].apply(parse_voltage)
     out = out.dropna(subset=needed).reset_index(drop=True)
     return out
 
 
 # ---------------------------------------------------------------------------
-# Граф байгуулах
+# Граф ба зангилааны мэдээлэл
 # ---------------------------------------------------------------------------
 
-def build_node_index(soums, lines):
-    """код -> (lat, lon) ба код -> нэр толь бичиг."""
-    coords, names = {}, {}
+def build_node_info(soums, lines):
+    """код -> {name, aimag, type, lat, lon, load_kw}."""
+    info = {}
     for _, r in soums.iterrows():
         c = _code(r['код'])
-        if c and not (pd.isna(r['lat']) or pd.isna(r['lon'])):
-            coords[c] = (float(r['lat']), float(r['lon']))
-            names[c] = str(r['сум']) if not pd.isna(r['сум']) else c
+        if not c or pd.isna(r['lat']) or pd.isna(r['lon']):
+            continue
+        load = r['хэрэглээ_квт']
+        info[c] = {
+            'name': str(r['сум']) if not pd.isna(r['сум']) else c,
+            'aimag': str(r['аймаг']) if not pd.isna(r['аймаг']) else None,
+            'type': str(r['төрөл']) if not pd.isna(r['төрөл']) else None,
+            'lat': float(r['lat']), 'lon': float(r['lon']),
+            'load_kw': float(load) if not pd.isna(load) else None,
+        }
     for _, r in lines.iterrows():
         for code, nm, la, lo in [
             (r['эхлэл_код'], r['эхлэл_нэр'], r['эхлэл_lat'], r['эхлэл_lon']),
             (r['дуусах_код'], r['дуусах_нэр'], r['дуусах_lat'], r['дуусах_lon']),
         ]:
             c = _code(code)
-            if c and c not in coords and not (pd.isna(la) or pd.isna(lo)):
-                coords[c] = (float(la), float(lo))
-                names.setdefault(c, str(nm) if not pd.isna(nm) else c)
-    return coords, names
+            if c and c not in info and not (pd.isna(la) or pd.isna(lo)):
+                info[c] = {
+                    'name': str(nm) if not pd.isna(nm) else c,
+                    'aimag': None, 'type': None,
+                    'lat': float(la), 'lon': float(lo), 'load_kw': None,
+                }
+    return info
 
 
-def build_adjacency(lines):
+def build_adjacency(lines, grid: GridParams):
     """
-    adj[a][b] = тухайн хосыг холбосон шугамын нэвтрүүлэх чадвар (МВт).
-    Тодорхойгүй (NaN) чадварыг хязгааргүй (inf) гэж үзнэ — өөрөөр хэлбэл
-    "хүрэлцэнэ гэж таамаглана". Хэд хэдэн зэрэгцээ шугам байвал хамгийн ихийг авна.
+    adj[a][b] = тухайн хосыг холбосон шугамын нэвтрүүлэх чадвар (кВт).
+    Чадварыг хүчдэл+уртаас тооцоолно. Хүчдэл тодорхойгүй бол хязгааргүй (inf).
+    Зэрэгцээ шугам байвал чадварыг нэмнэ.
     """
     adj = defaultdict(dict)
     for _, r in lines.iterrows():
         a, b = _code(r['эхлэл_код']), _code(r['дуусах_код'])
         if not a or not b or a == b:
             continue
-        cap = r['чадвар_мвт']
-        cap_val = math.inf if pd.isna(cap) else float(cap)
+        cap = line_capacity_kw(r['хүчдэл_num'], r['урт'], grid)
+        cap_val = math.inf if cap is None else float(cap)
         for x, y in ((a, b), (b, a)):
-            adj[x][y] = max(adj[x].get(y, -math.inf), cap_val)
+            prev = adj[x].get(y)
+            if prev is None:
+                adj[x][y] = cap_val
+            elif math.isinf(prev) or math.isinf(cap_val):
+                adj[x][y] = math.inf
+            else:
+                adj[x][y] = prev + cap_val   # зэрэгцээ шугам -> нэмэгдэнэ
     return adj
 
 
@@ -168,29 +202,21 @@ def find_components(adj, all_nodes):
 
 
 # ---------------------------------------------------------------------------
-# Чадвараар хязгаарлагдсан төвлөрсөн хангамж боломжтой эсэх
+# Чадвараар хязгаарлагдсан төвлөрсөн хангамж (бүгд кВт)
 # ---------------------------------------------------------------------------
 
 def _check_root(root, adj, soum_loads):
-    """
-    root цэгт станц байрлуулж, BFS-ээр цацраг (radial) сүлжээ үүсгэн,
-    шугам бүрийн дамжуулах урсгал (доош байрлах сумдын ачаалал) нь
-    тухайн шугамын чадвараас хэтрэхгүй эсэхийг шалгана.
-    Буцаах: (боломжтой_эсэх, тодорхойгүй_чадвар_ашигласан_эсэх, хүрэх_цэгүүд)
-    """
     parent = {root: None}
     order = [root]
     dq = deque([root])
     while dq:
         u = dq.popleft()
-        # Илүү их чадвартай шугамыг эхэлж сонгох (модыг сайжруулна)
         for v, cap in sorted(adj.get(u, {}).items(), key=lambda kv: -kv[1]):
             if v not in parent:
                 parent[v] = u
                 order.append(v)
                 dq.append(v)
 
-    # Дэд модны ачаалал (доороос дээш)
     sub = {n: float(soum_loads.get(n, 0.0)) for n in order}
     for n in reversed(order):
         p = parent[n]
@@ -202,24 +228,19 @@ def _check_root(root, adj, soum_loads):
         p = parent[n]
         if p is None:
             continue
-        flow_mw = sub[n] / 1000.0          # доош дамжих ачаалал (кВт -> МВт)
-        cap = adj[p][n]
+        flow_kw = sub[n]                 # доош дамжих ачаалал (кВт)
+        cap = adj[p][n]                  # чадвар (кВт)
         if math.isinf(cap):
             used_unknown = True
-        elif cap < flow_mw - 1e-9:
+        elif cap < flow_kw - 1e-6:
             return False, used_unknown, set(order)
     return True, used_unknown, set(order)
 
 
 def centralized_feasible(comp_nodes, adj, soum_loads):
-    """
-    Сүлжээний аль нэг цэгт станц байрлуулбал бүх сумыг чадварын
-    хязгаарт багтаан хангаж болох эсэх. Боломжтой эхний цэгийг (root) буцаана.
-    """
     soum_nodes = [n for n in comp_nodes if n in soum_loads]
     if not soum_nodes:
         return False, None, False
-    # Ачаалал ихтэй цэгүүдийг эхэлж туршвал төв байрлал олдох магадлал өндөр
     candidates = sorted(comp_nodes, key=lambda n: -soum_loads.get(n, 0.0))
     for root in candidates:
         ok, used_unknown, reached = _check_root(root, adj, soum_loads)
@@ -232,20 +253,16 @@ def centralized_feasible(comp_nodes, adj, soum_loads):
 # Үндсэн дүн шинжилгээ
 # ---------------------------------------------------------------------------
 
-def analyze(soums, lines, assumptions: Assumptions):
-    """
-    Сүлжээ (component) бүрээр төвлөрсөн ба тараангуй хувилбарыг тооцоолж,
-    чадварын хязгаарыг харгалзан хамгийн бага зардлын зөвлөмжийг гаргана.
-    """
-    coords, names = build_node_index(soums, lines)
-    adj = build_adjacency(lines)
-    soum_loads = {}
-    for _, r in soums.iterrows():
-        c = _code(r['код'])
-        if c and not pd.isna(r['хэрэглээ_квт']):
-            soum_loads[c] = float(r['хэрэглээ_квт'])
+def analyze(soums, lines, assumptions: Assumptions, grid: GridParams = None):
+    if grid is None:
+        grid = GridParams()
 
-    all_nodes = set(adj) | set(soum_loads)
+    node_info = build_node_info(soums, lines)
+    adj = build_adjacency(lines, grid)
+    soum_loads = {c: v['load_kw'] for c, v in node_info.items()
+                  if v['load_kw'] is not None and v['load_kw'] > 0}
+
+    all_nodes = set(adj) | set(node_info)
     comps = find_components(adj, all_nodes)
 
     components = []
@@ -253,47 +270,35 @@ def analyze(soums, lines, assumptions: Assumptions):
     for i, comp in enumerate(comps):
         soum_codes = [n for n in comp if n in soum_loads]
         if not soum_codes:
-            continue  # ачаалалгүй сүлжээ (зөвхөн зангилаа) — алгасна
+            continue
         total_load = sum(soum_loads[c] for c in soum_codes)
-        soum_names = sorted(names.get(c, c) for c in soum_codes)
+        soum_names = sorted(node_info.get(c, {}).get('name', c) for c in soum_codes)
 
-        # Тараангуй: сум бүр өөрийн станцтай
         per_soum = {c: size_solar_system(soum_loads[c], assumptions) for c in soum_codes}
         distributed_cost = sum(s['cost_total'] for s in per_soum.values())
-
-        # Төвлөрсөн: нэг станц бүх сүлжээг
         central = size_solar_system(total_load, assumptions)
         centralized_cost = central['cost_total']
 
         feasible, plant_code, used_unknown = centralized_feasible(comp, adj, soum_loads)
-
         if feasible and centralized_cost <= distributed_cost:
-            recommended = 'centralized'
-            recommended_cost = centralized_cost
+            recommended, recommended_cost = 'centralized', centralized_cost
         else:
-            recommended = 'distributed'
-            recommended_cost = distributed_cost
+            recommended, recommended_cost = 'distributed', distributed_cost
             if not feasible:
                 plant_code = None
 
         result = {
-            'id': i,
-            'nodes': comp,
-            'soum_codes': soum_codes,
-            'soum_names': soum_names,
-            'soum_count': len(soum_codes),
-            'total_load_kw': total_load,
-            'distributed_cost': distributed_cost,
-            'centralized_cost': centralized_cost,
-            'centralized_feasible': feasible,
-            'capacity_unknown_used': used_unknown,
-            'recommended': recommended,
-            'recommended_cost': recommended_cost,
+            'id': i, 'nodes': comp,
+            'soum_codes': soum_codes, 'soum_names': soum_names,
+            'soum_count': len(soum_codes), 'total_load_kw': total_load,
+            'distributed_cost': distributed_cost, 'centralized_cost': centralized_cost,
+            'centralized_feasible': feasible, 'capacity_unknown_used': used_unknown,
+            'recommended': recommended, 'recommended_cost': recommended_cost,
             'savings': distributed_cost - recommended_cost,
             'plant_code': plant_code,
-            'plant_coord': coords.get(plant_code) if plant_code else None,
-            'central_system': central,
-            'per_soum_system': per_soum,
+            'plant_coord': (node_info[plant_code]['lat'], node_info[plant_code]['lon'])
+                           if plant_code and plant_code in node_info else None,
+            'central_system': central, 'per_soum_system': per_soum,
         }
         components.append(result)
         for c in soum_codes:
@@ -307,13 +312,11 @@ def analyze(soums, lines, assumptions: Assumptions):
         'n_centralized': sum(1 for r in components if r['recommended'] == 'centralized'),
         'n_distributed': sum(1 for r in components if r['recommended'] == 'distributed'),
         'total_load_kw': sum(r['total_load_kw'] for r in components),
+        'n_load_points': len(soum_loads),
     }
 
     return {
-        'components': components,
-        'code_to_comp': code_to_comp,
-        'coords': coords,
-        'names': names,
-        'soum_loads': soum_loads,
-        'summary': summary,
+        'components': components, 'code_to_comp': code_to_comp,
+        'node_info': node_info, 'soum_loads': soum_loads,
+        'adj': adj, 'grid': grid, 'summary': summary,
     }

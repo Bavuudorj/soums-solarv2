@@ -8,16 +8,33 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
+from dataclasses import asdict
+
 from solar import Assumptions, size_solar_system
+from capacity import GridParams
 from network import load_soums, load_lines, analyze
-from mapbuilder import build_map
+from mapbuilder import build_map, build_milp_map
+from profiles import load_demand_profiles
+from pvgis import seasonal_solar_profiles
+from optimize import EconParams, optimize_all
 
 st.set_page_config(page_title="Нарны хангамжийн төлөвлөлт", layout="wide")
 
 
 @st.cache_data
 def get_data():
-    return load_soums("soums.xlsx"), load_lines("lines.xlsx")
+    return load_soums("soums_v2.xlsx"), load_lines("lines_v2.xlsx")
+
+
+@st.cache_data(show_spinner=False)
+def run_milp(econ_dict, grid_dict, use_api):
+    soums, lines = get_data()
+    grid = GridParams(**grid_dict)
+    an = analyze(soums, lines, Assumptions(), grid)
+    rep, w = load_demand_profiles()
+    solar = {c: seasonal_solar_profiles(info['lat'], info['lon'], use_api=use_api)
+             for c, info in an['node_info'].items()}
+    return optimize_all(an, lines, rep, w, solar, EconParams(**econ_dict), grid)
 
 
 st.title("☀️ Сумдын нарны эрчим хүчний хангамжийн төлөвлөлт")
@@ -31,7 +48,9 @@ with st.sidebar:
     st.header("⚙️ Таамаглалууд")
     a = Assumptions()
     a.psh = st.slider("Нар ашиглалт (цаг/өдөр)", 3.0, 6.0, 4.5, 0.1)
-    a.autonomy_days = st.slider("Батарейн нөөц (өдөр)", 1.0, 3.0, 1.0, 0.5)
+    a.load_factor = st.slider("Ачааллын коэф. LF (дундаж/оргил)", 0.20, 0.60, 0.35, 0.01,
+                              help="Оргил чадлыг өдрийн дундаж руу шилжүүлнэ: E = 24·LF·P")
+    a.autonomy_days = st.slider("Батарейн нөөц (өдөр)", 0.25, 3.0, 1.0, 0.25)
     a.performance_ratio = st.slider("Системийн ашиг (PR)", 0.60, 0.90, 0.75, 0.01)
     a.battery_dod = st.slider("Батарей DoD", 0.50, 0.95, 0.80, 0.05)
     st.divider()
@@ -39,6 +58,24 @@ with st.sidebar:
     a.cost_per_kwh = st.number_input("Батарей өртөг ($/кВт·ц)", value=350.0, step=10.0)
     a.fixed_cost = st.number_input("Станцын тогтмол зардал ($)", value=8000.0, step=500.0)
     a.panel_wp = st.number_input("Панелийн чадал (Вт)", value=550.0, step=10.0)
+    st.divider()
+    st.caption("Шугамын чадварын тооцоо")
+    g = GridParams()
+    g.cos_phi = st.slider("Чадварын коэф. (cosφ)", 0.80, 1.00, 0.90, 0.01)
+    g.dU_max = st.slider("Зөвш. хүчдэлийн уналт (%)", 4.0, 10.0, 6.0, 0.5)
+
+    st.divider()
+    with st.expander("⚡ MILP оновчлолын параметр"):
+        econ = EconParams()
+        econ.c_pv = st.number_input("PV CAPEX ($/кВт)", value=800.0, step=50.0)
+        econ.c_be = st.number_input("Батарей энерги ($/кВт·ц)", value=300.0, step=10.0)
+        econ.c_bp = st.number_input("Батарей чадал ($/кВт)", value=200.0, step=10.0)
+        econ.lambda_imp = st.number_input("Импортын тариф ($/кВт·ц)", value=0.08, step=0.01, format="%.3f")
+        econ.lambda_exp = st.number_input("Экспортын үнэ ($/кВт·ц)", value=0.04, step=0.01, format="%.3f")
+        econ.voll = st.number_input("VoLL ($/кВт·ц)", value=1.0, step=0.1)
+        econ.r = st.slider("Хямдруулалтын хүү", 0.03, 0.15, 0.08, 0.01)
+        econ.alpha = st.slider("Найдвартай байдал α", 0.90, 0.999, 0.99, 0.005)
+        use_api = st.checkbox("Нарны өгөгдөл PVGIS API-аас (удаан)", value=False)
 
 try:
     soums, lines = get_data()
@@ -46,19 +83,21 @@ except Exception as e:
     st.error(f"Өгөгдөл уншихад алдаа гарлаа: {e}")
     st.stop()
 
-analysis = analyze(soums, lines, a)
+analysis = analyze(soums, lines, a, g)
 s = analysis['summary']
 comps = analysis['components']
 
 # --- Нийт үзүүлэлт ---
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Нийт хамгийн бага зардал", f"${s['total_min_cost']:,.0f}")
-c2.metric("Хэмнэлт (vs тараангуй)", f"${s['total_savings']:,.0f}")
+c2.metric("Хэмнэлт (vs тархмал)", f"${s['total_savings']:,.0f}")
 c3.metric("Сүлжээ", f"{s['n_networks']}",
-          help=f"Төвлөрсөн: {s['n_centralized']} | Тараангуй: {s['n_distributed']}")
+          help=f"Төвлөрсөн: {s['n_centralized']} | Тархмал: {s['n_distributed']}")
 c4.metric("Нийт ачаалал", f"{s['total_load_kw']:,.0f} кВт")
 
-tab_map, tab_table, tab_detail = st.tabs(["🗺️ Газрын зураг", "📋 Сүлжээний хүснэгт", "🔍 Дэлгэрэнгүй"])
+tab_map, tab_table, tab_detail, tab_milp, tab_stations = st.tabs(
+    ["🗺️ Газрын зураг", "📋 Сүлжээний хүснэгт", "🔍 Дэлгэрэнгүй",
+     "⚡ MILP оновчлол", "🏭 Станц сонголт"])
 
 # --- Газрын зураг ---
 with tab_map:
@@ -74,12 +113,12 @@ with tab_table:
             "Сүлжээ": ", ".join(r['soum_names'][:3]) + (" …" if r['soum_count'] > 3 else ""),
             "Сум": r['soum_count'],
             "Ачаалал (кВт)": round(r['total_load_kw'], 0),
-            "Зөвлөмж": "Төвлөрсөн" if r['recommended'] == 'centralized' else "Тараангуй",
+            "Зөвлөмж": "Төвлөрсөн" if r['recommended'] == 'centralized' else "Тархмал",
             "Чадвар хүрэх": "✓" if r['centralized_feasible'] else "✗",
             "PV (кВт)": round(r['central_system']['pv_kwp'], 1),
             "Батарей (кВт·ц)": round(r['central_system']['battery_kwh'], 1),
             "Төвлөрсөн ($)": round(r['centralized_cost'], 0),
-            "Тараангуй ($)": round(r['distributed_cost'], 0),
+            "Тархмал ($)": round(r['distributed_cost'], 0),
             "Хамгийн бага ($)": round(r['recommended_cost'], 0),
             "Хэмнэлт ($)": round(r['savings'], 0),
         })
@@ -92,7 +131,8 @@ with tab_table:
 # --- Дэлгэрэнгүй (сум сонгох) ---
 with tab_detail:
     code_to_comp = analysis['code_to_comp']
-    names = analysis['names']
+    node_info = analysis['node_info']
+    names = {c: info['name'] for c, info in node_info.items()}
     soum_loads = analysis['soum_loads']
     options = sorted(soum_loads.keys(), key=lambda c: names.get(c, c))
     label = {c: f"{names.get(c, c)} ({soum_loads[c]:.0f} кВт)" for c in options}
@@ -101,7 +141,7 @@ with tab_detail:
     if sel:
         own = size_solar_system(soum_loads[sel], a)
         comp = code_to_comp.get(sel)
-        st.subheader(f"{names.get(sel, sel)} — өөрийн систем (тараангуй)")
+        st.subheader(f"{names.get(sel, sel)} — өөрийн систем (тархмал)")
         d1, d2, d3 = st.columns(3)
         d1.metric("Нарны чадал", f"{own['pv_kwp']:.1f} кВт", f"{own['panels']} панель")
         d2.metric("Батарей", f"{own['battery_kwh']:.1f} кВт·ц")
@@ -129,8 +169,122 @@ with tab_detail:
             else:
                 if not comp['centralized_feasible']:
                     st.warning(
-                        "**Зөвлөмж: ТАРААНГУЙ** — шугамын нэвтрүүлэх чадвар хүрэлцэхгүй тул "
+                        "**Зөвлөмж: ТАРХМАЛ** — шугамын нэвтрүүлэх чадвар хүрэлцэхгүй тул "
                         "сум бүрийг тусад нь хангах шаардлагатай."
                     )
                 else:
-                    st.warning("**Зөвлөмж: ТАРААНГУЙ** — энэ тохиолдолд тараангуй хувилбар хямд.")
+                    st.warning("**Зөвлөмж: ТАРХМАЛ** — энэ тохиолдолд тархмал хувилбар хямд.")
+
+# --- MILP оновчлол ---
+with tab_milp:
+    st.markdown("**Block 3 — Цаг тутмын MILP оновчлол** (grid-холболттой, LinDistFlow, "
+                "4 улирлын төлөөлөх өдөр). PV/батарейн хэмжээ ба диспэтчийг нэгэн зэрэг оновчилно.")
+    st.caption("Анхааруулга: бүх сүлжээг бодоход ~1.5 минут болдог. Үр дүн кэшлэгдэнэ.")
+
+    if st.button("⚡ MILP оновчлол ажиллуулах", type="primary"):
+        with st.spinner("Оновчлол хийж байна… (CBC солвер, 35 сүлжээ)"):
+            milp = run_milp(asdict(econ), asdict(g), use_api)
+        st.session_state['milp'] = milp
+
+    milp = st.session_state.get('milp')
+    if milp:
+        ms = milp['summary']
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Жилийн нийт зардал", f"${ms['total_annual_cost']:,.0f}")
+        m2.metric("Нийт CAPEX", f"${ms['total_capex']:,.0f}")
+        m3.metric("Систем LCOE", f"${ms['system_lcoe']:.3f}/кВт·ц" if ms['system_lcoe'] else "—")
+        m4.metric("Шийдсэн сүлжээ", f"{ms['n_solved']}/{ms['n_networks']}")
+        n1, n2, n3 = st.columns(3)
+        n1.metric("Нийт PV", f"{ms['total_pv_kw']:,.0f} кВт")
+        n2.metric("Нийт батарей", f"{ms['total_batt_kwh']:,.0f} кВт·ц")
+        n3.metric("Жилийн импорт", f"{ms['total_import_kwh']:,.0f} кВт·ц")
+
+        node_info = analysis['node_info']
+        st.info("Станцуудыг газрын зураг дээр сонгож асаах/унтраах, дэлгэрэнгүй "
+                "жагсаалтыг **🏭 Станц сонголт** табаас үзнэ үү.")
+        rows = []
+        for r in milp['results']:
+            comp = r['component']
+            rows.append({
+                "Сүлжээ": ", ".join(comp['soum_names'][:3]) + (" …" if comp['soum_count'] > 3 else ""),
+                "Сум": comp['soum_count'],
+                "Ачаалал (кВт)": round(comp['total_load_kw'], 0),
+                "Slack": node_info.get(r['slack'], {}).get('name', r['slack']),
+                "PV (кВт)": round(r['total_pv_kw'], 0),
+                "Батарей (кВт·ц)": round(r['total_batt_kwh'], 0),
+                "Батарей (кВт)": round(r['total_batt_kw'], 0),
+                "CAPEX ($)": round(r['capex'], 0),
+                "Жилийн ($)": round(r['annual_cost'], 0),
+                "Импорт (кВт·ц)": round(r['annual_import_kwh'], 0),
+                "ENS (кВт·ц)": round(r['annual_ens_kwh'], 0),
+                "LCOE ($/кВтц)": round(r['lcoe'], 3) if r['lcoe'] else None,
+                "Статус": r['status'],
+            })
+        dfm = pd.DataFrame(rows).sort_values("Ачаалал (кВт)", ascending=False)
+        st.dataframe(dfm, width='stretch', hide_index=True)
+        st.download_button("⬇️ MILP үр дүн (CSV)", dfm.to_csv(index=False).encode('utf-8-sig'),
+                           "milp_results.csv", "text/csv")
+    else:
+        st.info("Дээрх товчийг дарж оновчлолыг эхлүүлнэ үү.")
+
+# --- Станц сонголт (асаах/унтраах + сонгосны дэлгэрэнгүй жагсаалт) ---
+with tab_stations:
+    milp = st.session_state.get('milp')
+    if not milp:
+        st.info("Эхлээд **⚡ MILP оновчлол** табд оновчлолыг ажиллуулна уу.")
+    else:
+        node_info = analysis['node_info']
+        stations = []
+        for r in milp['results']:
+            for code, sz in r['sizing'].items():
+                if sz['pv_kw'] <= 0 and sz['batt_kwh'] <= 0:
+                    continue
+                info = node_info.get(code, {})
+                stations.append({
+                    'code': code, 'name': info.get('name', code),
+                    'lat': info.get('lat'), 'lon': info.get('lon'),
+                    'pv_kw': sz['pv_kw'], 'batt_kwh': sz['batt_kwh'], 'batt_kw': sz['batt_kw'],
+                    'lcoe': r['lcoe'], 'network': node_info.get(r['slack'], {}).get('name', r['slack']),
+                })
+        station_by_code = {s['code']: s for s in stations}
+        all_codes = sorted(station_by_code, key=lambda c: -station_by_code[c]['pv_kw'])
+        labels = {c: f"{station_by_code[c]['name']} ({station_by_code[c]['pv_kw']:,.0f} кВт PV)"
+                  for c in all_codes}
+
+        st.markdown(f"**Нийт {len(all_codes)} санал болгосон станц.** "
+                    "Доороос сонгож газрын зураг дээр асаана/унтраана.")
+        c1, c2 = st.columns([1, 3])
+        show_all = c1.checkbox("Бүгдийг асаах", value=True)
+        if show_all:
+            selected_codes = all_codes
+            c2.caption(f"✅ {len(all_codes)} станц бүгд асаалттай")
+        else:
+            selected_codes = c2.multiselect("Асаах станцууд", all_codes,
+                                            default=[], format_func=lambda c: labels[c])
+
+        shown = [station_by_code[c] for c in selected_codes if station_by_code[c]['lat'] is not None]
+        fmap = build_milp_map(shown, lines=lines)
+        st_folium(fmap, height=520, width=None, returned_objects=[])
+
+        st.subheader(f"📋 Сонгосон станцуудын дэлгэрэнгүй ({len(selected_codes)})")
+        if selected_codes:
+            srows = [{
+                "Станц": station_by_code[c]['name'],
+                "Код": c,
+                "Нарны чадал (кВт)": round(station_by_code[c]['pv_kw'], 0),
+                "Батарей (кВт·ц)": round(station_by_code[c]['batt_kwh'], 0),
+                "Батарей чадал (кВт)": round(station_by_code[c]['batt_kw'], 0),
+                "Сүлжээ": station_by_code[c]['network'],
+                "LCOE ($/кВтц)": round(station_by_code[c]['lcoe'], 3) if station_by_code[c]['lcoe'] else None,
+            } for c in selected_codes]
+            sdf = pd.DataFrame(srows).sort_values("Нарны чадал (кВт)", ascending=False)
+            t1, t2, t3 = st.columns(3)
+            t1.metric("Сонгосон станц", f"{len(selected_codes)}")
+            t2.metric("Нийт PV", f"{sum(station_by_code[c]['pv_kw'] for c in selected_codes):,.0f} кВт")
+            t3.metric("Нийт батарей", f"{sum(station_by_code[c]['batt_kwh'] for c in selected_codes):,.0f} кВт·ц")
+            st.dataframe(sdf, width='stretch', hide_index=True)
+            st.download_button("⬇️ Сонгосон станцууд (CSV)",
+                               sdf.to_csv(index=False).encode('utf-8-sig'),
+                               "selected_stations.csv", "text/csv", key="sel_stations_csv")
+        else:
+            st.info("Дээрээс станц сонгож асаана уу.")

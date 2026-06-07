@@ -1,5 +1,8 @@
 # Үүсгэсэн гаралт
 mongolia_electricity_map.html
+pvgis_cache.json
+_test_*.py
+_check.py
 *.log
 
 # Python
@@ -13,9 +16,17 @@ venv/
 import os.py
 Red_soums.xlsx
 lines11.xlsx
+lines12.xlsx
 line.pdf
 make_report.py
-Narny_hangamj_sudalgaa.docx
+*.docx
+papers/
+
+# Хуучин/ашиглагдахгүй икон, өгөгдөл
+Icon.jpeg
+icon.png
+soums_зассан.xlsx
+ЦДАШ_сүлжээ_цэг_шугам.xlsx
 
 # Excel түр файл
 ~$*.xlsx
