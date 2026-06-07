@@ -12,7 +12,7 @@ from dataclasses import asdict
 
 from solar import Assumptions, size_solar_system
 from capacity import GridParams
-from network import load_soums, load_lines, analyze
+from network import load_soums, load_lines, analyze, build_node_info
 from mapbuilder import build_map, build_milp_map
 from profiles import load_demand_profiles
 from pvgis import seasonal_solar_profiles
@@ -26,15 +26,12 @@ def get_data():
     return load_soums("soums_v2.xlsx"), load_lines("lines_v2.xlsx")
 
 
-@st.cache_data(show_spinner=False)
-def run_milp(econ_dict, grid_dict, use_api):
+@st.cache_data(show_spinner="Нарны өгөгдөл бэлтгэж байна…")
+def get_solar_profiles(use_api):
     soums, lines = get_data()
-    grid = GridParams(**grid_dict)
-    an = analyze(soums, lines, Assumptions(), grid)
-    rep, w = load_demand_profiles()
-    solar = {c: seasonal_solar_profiles(info['lat'], info['lon'], use_api=use_api)
-             for c, info in an['node_info'].items()}
-    return optimize_all(an, lines, rep, w, solar, EconParams(**econ_dict), grid)
+    info = build_node_info(soums, lines)
+    return {c: seasonal_solar_profiles(v['lat'], v['lon'], use_api=use_api)
+            for c, v in info.items()}
 
 
 st.title("☀️ Сумдын нарны эрчим хүчний хангамжийн төлөвлөлт")
@@ -182,9 +179,25 @@ with tab_milp:
     st.caption("Анхааруулга: бүх сүлжээг бодоход ~1.5 минут болдог. Үр дүн кэшлэгдэнэ.")
 
     if st.button("⚡ MILP оновчлол ажиллуулах", type="primary"):
-        with st.spinner("Оновчлол хийж байна… (CBC солвер, 35 сүлжээ)"):
-            milp = run_milp(asdict(econ), asdict(g), use_api)
-        st.session_state['milp'] = milp
+        cache_key = (tuple(sorted(asdict(econ).items())),
+                     tuple(sorted(asdict(g).items())), use_api)
+        milp_cache = st.session_state.setdefault('milp_cache', {})
+        if cache_key in milp_cache:
+            st.session_state['milp'] = milp_cache[cache_key]
+        else:
+            solar = get_solar_profiles(use_api)
+            rep, w = load_demand_profiles()
+            prog = st.progress(0.0, text="Оновчлол эхэлж байна…")
+
+            def _cb(frac, n, total):
+                pct = int(round(min(frac, 1.0) * 100))
+                prog.progress(min(frac, 1.0),
+                              text=f"Оновчлол хийж байна… {pct}%  ({n}/{total} сүлжээ)")
+
+            result = optimize_all(analysis, lines, rep, w, solar, econ, g, progress=_cb)
+            prog.progress(1.0, text="✓ Оновчлол дууслаа (100%)")
+            milp_cache[cache_key] = result
+            st.session_state['milp'] = result
 
     milp = st.session_state.get('milp')
     if milp:

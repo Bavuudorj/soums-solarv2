@@ -301,14 +301,19 @@ def optimize_all(analysis, lines, demand_rep, demand_w, solar_by_code,
     line_edges = build_line_edges(lines)
     node_info = analysis['node_info']
 
+    comps = analysis['components']
+    total_w = sum(c.get('soum_count', 1) for c in comps) or 1
+    done_w = 0
     results = []
-    for i, comp in enumerate(analysis['components']):
+    for i, comp in enumerate(comps):
         res = optimize_network(comp, node_info, line_edges, demand_rep, demand_w,
                                solar_by_code, econ, grid)
         res['component'] = comp
         results.append(res)
+        done_w += comp.get('soum_count', 1)
         if progress:
-            progress(i + 1, len(analysis['components']))
+            # жигнэсэн гүйцэтгэлийн хувь (сүлжээний хэмжээгээр), хийгдсэн/нийт тоо
+            progress(done_w / total_w, i + 1, len(comps))
 
     summary = {
         'total_annual_cost': sum(r['annual_cost'] for r in results),
