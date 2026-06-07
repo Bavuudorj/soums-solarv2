@@ -240,14 +240,16 @@ def _add_legend(map_obj):
     map_obj.get_root().html.add_child(folium.Element(legend_html))
 
 
-def build_milp_map(stations, lines=None, icon_path="icon1.png", icon_size=32):
+def build_milp_map(stations, lines=None, icon_path="icon1.png", icon_size=32,
+                   center=None, zoom=None):
     """
     MILP-ийн санал болгосон нар+батарей станцуудыг газрын зураг дээр харуулна.
     stations: [{code,name,lat,lon,pv_kw,batt_kwh,batt_kw,lcoe,network}]
     Станцууд нь асаах/унтраах боломжтой давхаргад (LayerControl) байрлана.
     Marker дээр дарахад tooltip-д код буцаана (сонголт барихад).
     """
-    m = folium.Map(location=[46.8625, 103.0062], zoom_start=6, tiles='OpenStreetMap')
+    loc = [center['lat'], center['lng']] if center else [46.8625, 103.0062]
+    m = folium.Map(location=loc, zoom_start=(zoom or 6), tiles='OpenStreetMap')
 
     # Шугамыг бүдэг саарал дэвсгэр болгон (нэмэлт давхарга)
     if lines is not None:

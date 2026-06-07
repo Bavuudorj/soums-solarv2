@@ -248,43 +248,76 @@ with tab_stations:
                 })
         station_by_code = {s['code']: s for s in stations}
         all_codes = sorted(station_by_code, key=lambda c: -station_by_code[c]['pv_kw'])
-        labels = {c: f"{station_by_code[c]['name']} ({station_by_code[c]['pv_kw']:,.0f} кВт PV)"
-                  for c in all_codes}
 
-        st.markdown(f"**Нийт {len(all_codes)} санал болгосон станц.** "
-                    "Доороос сонгож газрын зураг дээр асаана/унтраана.")
-        c1, c2 = st.columns([1, 3])
-        show_all = c1.checkbox("Бүгдийг асаах", value=True)
-        if show_all:
-            selected_codes = all_codes
-            c2.caption(f"✅ {len(all_codes)} станц бүгд асаалттай")
-        else:
-            selected_codes = c2.multiselect("Асаах станцууд", all_codes,
-                                            default=[], format_func=lambda c: labels[c])
+        # --- Сонголтын төлөв (унтраалттай станцууд + undo/redo түүх) ---
+        ss = st.session_state
+        ss.setdefault('stn_off', set())
+        ss.setdefault('stn_undo', [])
+        ss.setdefault('stn_redo', [])
+        ss.setdefault('stn_lastclick', None)
+        ss.setdefault('stn_view', None)
+        ss['stn_off'] = {c for c in ss['stn_off'] if c in station_by_code}  # хүчинтэй болгох
+        off = ss['stn_off']
+        shown_codes = [c for c in all_codes if c not in off]
 
-        shown = [station_by_code[c] for c in selected_codes if station_by_code[c]['lat'] is not None]
-        fmap = build_milp_map(shown, lines=lines)
-        st_folium(fmap, height=520, width=None, returned_objects=[])
+        st.markdown(f"**Нийт {len(all_codes)} станц.** "
+                    "Газрын зураг дээрх **икон дээр дарж** тухайн станцыг унтраана.")
 
-        st.subheader(f"📋 Сонгосон станцуудын дэлгэрэнгүй ({len(selected_codes)})")
-        if selected_codes:
+        # --- Газрын зураг (харагдацыг хадгална) ---
+        view = ss['stn_view']
+        center = {'lat': view[0], 'lng': view[1]} if view else None
+        zoom = view[2] if view else None
+        shown = [station_by_code[c] for c in shown_codes if station_by_code[c]['lat'] is not None]
+        fmap = build_milp_map(shown, lines=lines, center=center, zoom=zoom)
+        state = st_folium(fmap, height=520, width=None, key='stn_map',
+                          returned_objects=['last_object_clicked_tooltip', 'center', 'zoom'])
+        if state:
+            if state.get('center') and state.get('zoom') is not None:
+                ss['stn_view'] = [state['center']['lat'], state['center']['lng'], state['zoom']]
+        click = state.get('last_object_clicked_tooltip') if state else None
+
+        # --- Reset / Undo / Redo товчнууд ---
+        b1, b2, b3, b4 = st.columns([1, 1, 1, 3])
+        reset = b1.button("🔄 Бүгдийг сэргээх")
+        undo = b2.button("↩️ Буцаах", disabled=not ss['stn_undo'])
+        redo = b3.button("↪️ Дахих", disabled=not ss['stn_redo'])
+        b4.caption(f"🔴 Унтраалттай: {len(off)}  |  🟢 Асаалттай: {len(shown_codes)}")
+
+        acted = False
+        if reset:
+            ss['stn_undo'].append(set(off)); ss['stn_redo'].clear()
+            ss['stn_off'] = set(); ss['stn_lastclick'] = click; acted = True
+        elif undo:
+            ss['stn_redo'].append(set(off)); ss['stn_off'] = ss['stn_undo'].pop()
+            ss['stn_lastclick'] = click; acted = True
+        elif redo:
+            ss['stn_undo'].append(set(off)); ss['stn_off'] = ss['stn_redo'].pop()
+            ss['stn_lastclick'] = click; acted = True
+        elif click and click in station_by_code and click != ss['stn_lastclick'] and click not in off:
+            ss['stn_undo'].append(set(off)); ss['stn_redo'].clear()
+            ss['stn_off'] = off | {click}; ss['stn_lastclick'] = click; acted = True
+        ss['stn_undo'] = ss['stn_undo'][-50:]  # түүхийг хязгаарлах
+        if acted:
+            st.rerun()
+
+        # --- Асаалттай станцуудын дэлгэрэнгүй жагсаалт ---
+        st.subheader(f"📋 Асаалттай станцуудын дэлгэрэнгүй ({len(shown_codes)})")
+        if shown_codes:
             srows = [{
-                "Станц": station_by_code[c]['name'],
-                "Код": c,
+                "Станц": station_by_code[c]['name'], "Код": c,
                 "Нарны чадал (кВт)": round(station_by_code[c]['pv_kw'], 0),
                 "Батарей (кВт·ц)": round(station_by_code[c]['batt_kwh'], 0),
                 "Батарей чадал (кВт)": round(station_by_code[c]['batt_kw'], 0),
                 "Сүлжээ": station_by_code[c]['network'],
                 "LCOE ($/кВтц)": round(station_by_code[c]['lcoe'], 3) if station_by_code[c]['lcoe'] else None,
-            } for c in selected_codes]
+            } for c in shown_codes]
             sdf = pd.DataFrame(srows).sort_values("Нарны чадал (кВт)", ascending=False)
             t1, t2, t3 = st.columns(3)
-            t1.metric("Сонгосон станц", f"{len(selected_codes)}")
-            t2.metric("Нийт PV", f"{sum(station_by_code[c]['pv_kw'] for c in selected_codes):,.0f} кВт")
-            t3.metric("Нийт батарей", f"{sum(station_by_code[c]['batt_kwh'] for c in selected_codes):,.0f} кВт·ц")
+            t1.metric("Асаалттай станц", f"{len(shown_codes)}")
+            t2.metric("Нийт PV", f"{sum(station_by_code[c]['pv_kw'] for c in shown_codes):,.0f} кВт")
+            t3.metric("Нийт батарей", f"{sum(station_by_code[c]['batt_kwh'] for c in shown_codes):,.0f} кВт·ц")
             st.dataframe(sdf, width='stretch', hide_index=True)
-            st.download_button("⬇️ Сонгосон станцууд (CSV)",
-                               sdf.to_csv(index=False).encode('utf-8-sig'),
+            st.download_button("⬇️ Жагсаалт (CSV)", sdf.to_csv(index=False).encode('utf-8-sig'),
                                "selected_stations.csv", "text/csv", key="sel_stations_csv")
         else:
-            st.info("Дээрээс станц сонгож асаана уу.")
+            st.info("Бүх станц унтраалттай байна. '🔄 Бүгдийг сэргээх'-ийг дарна уу.")
