@@ -1,6 +1,7 @@
 # Үүсгэсэн гаралт
 mongolia_electricity_map.html
 pvgis_cache.json
+saved_results/
 _test_*.py
 _check.py
 *.log

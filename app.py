@@ -4,6 +4,10 @@ Streamlit веб апп — Сумдын нарны эрчим хүчний ха
 Ажиллуулах:  streamlit run app.py
 """
 
+import os
+import re
+import pickle
+
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -19,6 +23,60 @@ from pvgis import seasonal_solar_profiles
 from optimize import EconParams, optimize_all, build_line_edges
 
 st.set_page_config(page_title="Нарны хангамжийн төлөвлөлт", layout="wide")
+
+# --- Үр дүн хадгалах / ачаалах ---
+SAVE_DIR = "saved_results"
+
+
+def _safe_name(name):
+    return re.sub(r'[^\w\-. ]', '_', str(name)).strip() or "untitled"
+
+
+def save_milp(name, milp):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    path = os.path.join(SAVE_DIR, _safe_name(name) + ".pkl")
+    with open(path, "wb") as f:
+        pickle.dump(milp, f)
+    return path
+
+
+def list_saved():
+    if not os.path.isdir(SAVE_DIR):
+        return []
+    return sorted(f[:-4] for f in os.listdir(SAVE_DIR) if f.endswith(".pkl"))
+
+
+def load_saved(name):
+    with open(os.path.join(SAVE_DIR, _safe_name(name) + ".pkl"), "rb") as f:
+        return pickle.load(f)
+
+
+def delete_saved(name):
+    p = os.path.join(SAVE_DIR, _safe_name(name) + ".pkl")
+    if os.path.exists(p):
+        os.remove(p)
+
+
+def milp_to_bytes(milp):
+    return pickle.dumps(milp)
+
+
+def match_soum_code(aimag, sumname, node_info):
+    """Бичсэн (аймаг, сум) нэрийг сүлжээний код руу тааруулна (олдохгүй бол None)."""
+    a = str(aimag or '').strip().lower()
+    s = str(sumname or '').strip().lower()
+    if not s:
+        return None
+    # Аймаг+нэр яг таарах
+    for c, v in node_info.items():
+        if v.get('name') and str(v['name']).strip().lower() == s:
+            if a and v.get('aimag') and str(v['aimag']).strip().lower() == a:
+                return c
+    # Аймаг хоосон эсвэл таарахгүй бол зөвхөн нэрээр
+    for c, v in node_info.items():
+        if v.get('name') and str(v['name']).strip().lower() == s:
+            return c
+    return None
 
 
 @st.cache_data
@@ -142,10 +200,6 @@ with tab_table:
     red_orig = sorted(c for c, v in vcode_orig.items() if v == 'Улаан')
     yellow_orig = sorted(c for c, v in vcode_orig.items() if v == 'Шар')
     ni = analysis['node_info']
-    vd_options = sorted(set(analysis['soum_loads']) | set(red_orig) | set(yellow_orig),
-                        key=lambda c: ni.get(c, {}).get('name', c))
-    vd_label = {c: f"{ni.get(c, {}).get('name', c)} "
-                   f"({ni.get(c, {}).get('aimag', '?')})" for c in vd_options}
 
     ssx = st.session_state
     if 'vd_red_codes' not in ssx:
@@ -155,11 +209,50 @@ with tab_table:
     if ssx.pop('_vd_reset', False):
         ssx['vd_red_codes'] = red_orig
         ssx['vd_yellow_codes'] = yellow_orig
+    # Гараас нэмсэн сумыг жагсаалтад оруулна (multiselect-ийн өмнө)
+    for pend, lst in [('_vd_add_red', 'vd_red_codes'), ('_vd_add_yellow', 'vd_yellow_codes')]:
+        code = ssx.pop(pend, None)
+        if code and code not in ssx[lst]:
+            ssx[lst] = ssx[lst] + [code]
+
+    # Сонголтын бүх код multiselect-ийн options-д багтсан байх
+    vd_options = sorted(set(analysis['soum_loads']) | set(red_orig) | set(yellow_orig)
+                        | set(ssx['vd_red_codes']) | set(ssx['vd_yellow_codes']),
+                        key=lambda c: ni.get(c, {}).get('name', c))
+    vd_label = {c: f"{ni.get(c, {}).get('name', c)} "
+                   f"({ni.get(c, {}).get('aimag', '?')})" for c in vd_options}
 
     red_sel = st.multiselect("🔴 Улаан (их уналт) сумд", vd_options,
                              key='vd_red_codes', format_func=lambda c: vd_label[c])
+    with st.form("add_red_form", clear_on_submit=True):
+        rf1, rf2, rf3 = st.columns([2, 2, 1])
+        r_aimag = rf1.text_input("Аймаг", key="add_red_aimag", placeholder="жишээ: Архангай")
+        r_sum = rf2.text_input("Сум", key="add_red_sum", placeholder="жишээ: Тариат")
+        rf3.markdown("<br>", unsafe_allow_html=True)
+        red_add = rf3.form_submit_button("➕ Улаанд нэмэх")
+    if red_add:
+        code = match_soum_code(r_aimag, r_sum, ni)
+        if code:
+            ssx['_vd_add_red'] = code
+            st.rerun()
+        else:
+            st.warning(f"'{r_aimag} / {r_sum}' сүлжээнээс олдсонгүй.")
+
     yellow_sel = st.multiselect("🟡 Шар (дунд уналт) сумд", vd_options,
                                 key='vd_yellow_codes', format_func=lambda c: vd_label[c])
+    with st.form("add_yellow_form", clear_on_submit=True):
+        yf1, yf2, yf3 = st.columns([2, 2, 1])
+        y_aimag = yf1.text_input("Аймаг", key="add_yellow_aimag", placeholder="жишээ: Завхан")
+        y_sum = yf2.text_input("Сум", key="add_yellow_sum", placeholder="жишээ: Тосонцэнгэл")
+        yf3.markdown("<br>", unsafe_allow_html=True)
+        yellow_add = yf3.form_submit_button("➕ Шарт нэмэх")
+    if yellow_add:
+        code = match_soum_code(y_aimag, y_sum, ni)
+        if code:
+            ssx['_vd_add_yellow'] = code
+            st.rerun()
+        else:
+            st.warning(f"'{y_aimag} / {y_sum}' сүлжээнээс олдсонгүй.")
 
     if st.button("🔄 Reset (анхны жагсаалт)"):
         ssx['_vd_reset'] = True
@@ -231,6 +324,29 @@ with tab_milp:
                "байрлуулна. 35 кВ-гүй сүлжээ зөвхөн grid-ээс хангагдана (Grid-only).")
     st.caption("Анхааруулга: бүх сүлжээг бодоход ~1.5 минут болдог. Үр дүн кэшлэгдэнэ.")
 
+    # --- Хадгалсан үр дүн ачаалах / татах ---
+    with st.expander("📂 Хадгалсан үр дүн ачаалах / татах файлаас"):
+        saved = list_saved()
+        if saved:
+            lc1, lc2, lc3 = st.columns([3, 1, 1])
+            pick = lc1.selectbox("Хадгалсан үр дүн", saved, key="load_pick")
+            if lc2.button("📂 Ачаалах", key="load_btn"):
+                st.session_state['milp'] = load_saved(pick)
+                st.success(f"Ачаалагдлаа: {pick}")
+                st.rerun()
+            if lc3.button("🗑️ Устгах", key="del_btn"):
+                delete_saved(pick)
+                st.rerun()
+        else:
+            st.caption("Хадгалсан үр дүн алга байна.")
+        up = st.file_uploader("Татаж авсан файлаас ачаалах (.pkl)", type=["pkl"], key="up_milp")
+        if up is not None:
+            try:
+                st.session_state['milp'] = pickle.load(up)
+                st.success("Файлаас ачаалагдлаа.")
+            except Exception as e:
+                st.error(f"Ачаалахад алдаа: {e}")
+
     if st.button("⚡ MILP оновчлол ажиллуулах", type="primary"):
         cache_key = (tuple(sorted(asdict(econ).items())),
                      tuple(sorted(asdict(g).items())), use_api)
@@ -289,8 +405,24 @@ with tab_milp:
             })
         dfm = pd.DataFrame(rows).sort_values("Ачаалал (кВт)", ascending=False)
         st.dataframe(dfm, width='stretch', hide_index=True)
-        st.download_button("⬇️ MILP үр дүн (CSV)", dfm.to_csv(index=False).encode('utf-8-sig'),
-                           "milp_results.csv", "text/csv")
+
+        # --- Хадгалах / татах ---
+        st.divider()
+        st.subheader("💾 Үр дүн хадгалах / татах")
+        sc1, sc2 = st.columns([3, 1])
+        save_name = sc1.text_input("Нэр өгөх", placeholder="жишээ: variant-1",
+                                   key="save_name", label_visibility="collapsed")
+        if sc2.button("💾 Хадгалах", disabled=not save_name):
+            save_milp(save_name, milp)
+            st.success(f"Хадгалагдлаа: {_safe_name(save_name)}")
+            st.rerun()
+        d1, d2 = st.columns(2)
+        d1.download_button("⬇️ Хүснэгт (CSV)", dfm.to_csv(index=False).encode('utf-8-sig'),
+                           "milp_results.csv", "text/csv", key="dl_csv")
+        d2.download_button("⬇️ Бүтэн үр дүн (.pkl)", milp_to_bytes(milp),
+                           f"{_safe_name(save_name) if save_name else 'milp_result'}.pkl",
+                           "application/octet-stream", key="dl_pkl",
+                           help="Дараа нь дээрх 'Файлаас ачаалах'-аар буцааж нээж болно")
 
         st.caption("🔴🟡 Хүчдэлийн уналттай сумдын жагсаалтыг **📋 Сүлжээний хүснэгт** "
                    "табаас засварлана.")
