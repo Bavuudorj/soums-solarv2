@@ -124,6 +124,37 @@ def load_lines(path):
     return out
 
 
+def load_voltage_drop(path, node_info):
+    """
+    Уналттай.xlsx (Аймаг, Сум, Өнгө) -> хүчдэлийн уналттай сумд.
+      Улаан = их уналт, Шар = дунд уналт.
+    Буцаах: (code_color, df)
+      code_color[код] = 'Улаан'|'Шар'   (сүлжээнд таарсан сумд)
+      df = бүтэн жагсаалт (Аймаг, Сум, Өнгө) харуулахад
+    """
+    df = pd.read_excel(path)
+    df.columns = [str(c).strip() for c in df.columns]
+    a_col = pick_column(df, 'Аймаг')
+    s_col = pick_column(df, 'Сум', 'Цэгийн нэр', 'Нэр')
+    c_col = pick_column(df, 'Өнгө', 'Color')
+
+    key2code = {}
+    for code, v in node_info.items():
+        if v.get('aimag') and v.get('name'):
+            key2code[(str(v['aimag']).strip(), str(v['name']).strip())] = code
+
+    code_color = {}
+    for _, r in df.iterrows():
+        k = (str(r[a_col]).strip(), str(r[s_col]).strip())
+        code = key2code.get(k)
+        if code:
+            code_color[code] = str(r[c_col]).strip()
+
+    disp = df[[a_col, s_col, c_col]].rename(
+        columns={a_col: 'Аймаг', s_col: 'Сум', c_col: 'Өнгө'})
+    return code_color, disp
+
+
 # ---------------------------------------------------------------------------
 # Граф ба зангилааны мэдээлэл
 # ---------------------------------------------------------------------------

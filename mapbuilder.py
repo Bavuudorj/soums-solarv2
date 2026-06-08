@@ -264,12 +264,23 @@ def build_milp_map(stations, lines=None, icon_path="icon1.png", icon_size=32,
 
     data_uri = icon_data_uri(icon_path, size=64)
     station_fg = folium.FeatureGroup(name="☀️ Нар+батарей станц", show=True)
+    vdrop_colors = {'Улаан': '#d73027', 'Шар': '#f1c40f'}
     for stn in stations:
+        # Хүчдэлийн уналтын өнгөт цагираг (улаан/шар)
+        vd = stn.get('vdrop')
+        if vd in vdrop_colors:
+            folium.CircleMarker(
+                location=[stn['lat'], stn['lon']], radius=icon_size * 0.42,
+                color=vdrop_colors[vd], weight=4, fill=False, opacity=0.95
+            ).add_to(station_fg)
+
         popup = [f"<b>{stn['name']}</b>",
                  f"☀️ Нарны чадал: {fmt(stn['pv_kw'], 0)} кВт",
                  f"🔋 Батарей: {fmt(stn['batt_kwh'], 0)} кВт·ц / {fmt(stn['batt_kw'], 0)} кВт"]
         if stn.get('lcoe'):
             popup.append(f"💲 LCOE: ${stn['lcoe']:.3f}/кВт·ц")
+        if vd:
+            popup.append(f"⚡ Хүчдэлийн уналт: <b>{vd}</b>")
         if data_uri:
             icon = folium.CustomIcon(data_uri, icon_size=(icon_size, icon_size))
         else:

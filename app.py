@@ -12,11 +12,11 @@ from dataclasses import asdict
 
 from solar import Assumptions, size_solar_system
 from capacity import GridParams
-from network import load_soums, load_lines, analyze, build_node_info
+from network import load_soums, load_lines, analyze, build_node_info, load_voltage_drop
 from mapbuilder import build_map, build_milp_map
 from profiles import load_demand_profiles
 from pvgis import seasonal_solar_profiles
-from optimize import EconParams, optimize_all
+from optimize import EconParams, optimize_all, build_line_edges
 
 st.set_page_config(page_title="Нарны хангамжийн төлөвлөлт", layout="wide")
 
@@ -24,6 +24,13 @@ st.set_page_config(page_title="Нарны хангамжийн төлөвлөл�
 @st.cache_data
 def get_data():
     return load_soums("soums_v2.xlsx"), load_lines("lines_v2.xlsx")
+
+
+@st.cache_data
+def get_voltage_drop():
+    soums, lines = get_data()
+    info = build_node_info(soums, lines)
+    return load_voltage_drop("Уналттай.xlsx", info)
 
 
 @st.cache_data(show_spinner="Нарны өгөгдөл бэлтгэж байна…")
@@ -44,7 +51,7 @@ st.caption(
 with st.sidebar:
     st.header("⚙️ Таамаглалууд")
     a = Assumptions()
-    a.psh = st.slider("Нар ашиглалт (цаг/өдөр)", 3.0, 6.0, 4.5, 0.1)
+    a.psh = st.slider("Нар ашиглалт (цаг/өдөр)", 3.0, 6.0, 4.0, 0.1)
     a.load_factor = st.slider("Ачааллын коэф. LF (дундаж/оргил)", 0.20, 0.60, 0.35, 0.01,
                               help="Оргил чадлыг өдрийн дундаж руу шилжүүлнэ: E = 24·LF·P")
     a.autonomy_days = st.slider("Батарейн нөөц (өдөр)", 0.25, 3.0, 1.0, 0.25)
@@ -58,7 +65,7 @@ with st.sidebar:
     st.divider()
     st.caption("Шугамын чадварын тооцоо")
     g = GridParams()
-    g.cos_phi = st.slider("Чадварын коэф. (cosφ)", 0.80, 1.00, 0.90, 0.01)
+    g.cos_phi = st.slider("Чадварын коэф. (cosφ)", 0.80, 1.00, 0.80, 0.01)
     g.dU_max = st.slider("Зөвш. хүчдэлийн уналт (%)", 4.0, 10.0, 6.0, 0.5)
 
     st.divider()
@@ -67,11 +74,11 @@ with st.sidebar:
         econ.c_pv = st.number_input("PV CAPEX ($/кВт)", value=800.0, step=50.0)
         econ.c_be = st.number_input("Батарей энерги ($/кВт·ц)", value=300.0, step=10.0)
         econ.c_bp = st.number_input("Батарей чадал ($/кВт)", value=200.0, step=10.0)
-        econ.lambda_imp = st.number_input("Импортын тариф ($/кВт·ц)", value=0.08, step=0.01, format="%.3f")
-        econ.lambda_exp = st.number_input("Экспортын үнэ ($/кВт·ц)", value=0.04, step=0.01, format="%.3f")
+        econ.lambda_imp = st.number_input("Импортын тариф ($/кВт·ц)", value=0.78, step=0.01, format="%.3f")
+        econ.lambda_exp = st.number_input("Экспортын үнэ ($/кВт·ц)", value=0.78, step=0.01, format="%.3f")
         econ.voll = st.number_input("VoLL ($/кВт·ц)", value=1.0, step=0.1)
         econ.r = st.slider("Хямдруулалтын хүү", 0.03, 0.15, 0.08, 0.01)
-        econ.alpha = st.slider("Найдвартай байдал α", 0.90, 0.999, 0.99, 0.005)
+        econ.alpha = st.slider("Найдвартай байдал α", 0.90, 0.999, 0.91, 0.005)
         use_api = st.checkbox("Нарны өгөгдөл PVGIS API-аас (удаан)", value=False)
 
 try:
@@ -124,6 +131,50 @@ with tab_table:
 
     csv = df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("⬇️ CSV татах", csv, "network_plan.csv", "text/csv")
+
+    # --- Хүчдэлийн уналттай сумд (засварлах боломжтой) ---
+    st.divider()
+    st.subheader("🔴🟡 Хүчдэлийн уналттай сумд (засварлах боломжтой)")
+    st.caption("🔴 Улаан — их уналт, 🟡 Шар — дунд уналт. Жагсаалтыг гараас нэмж/хасч "
+               "болно. **Reset** дарвал анхны (файлын) жагсаалт сэргэнэ.")
+
+    vcode_orig, _ = get_voltage_drop()
+    red_orig = sorted(c for c, v in vcode_orig.items() if v == 'Улаан')
+    yellow_orig = sorted(c for c, v in vcode_orig.items() if v == 'Шар')
+    ni = analysis['node_info']
+    vd_options = sorted(set(analysis['soum_loads']) | set(red_orig) | set(yellow_orig),
+                        key=lambda c: ni.get(c, {}).get('name', c))
+    vd_label = {c: f"{ni.get(c, {}).get('name', c)} "
+                   f"({ni.get(c, {}).get('aimag', '?')})" for c in vd_options}
+
+    ssx = st.session_state
+    if 'vd_red_codes' not in ssx:
+        ssx['vd_red_codes'] = red_orig
+    if 'vd_yellow_codes' not in ssx:
+        ssx['vd_yellow_codes'] = yellow_orig
+    if ssx.pop('_vd_reset', False):
+        ssx['vd_red_codes'] = red_orig
+        ssx['vd_yellow_codes'] = yellow_orig
+
+    red_sel = st.multiselect("🔴 Улаан (их уналт) сумд", vd_options,
+                             key='vd_red_codes', format_func=lambda c: vd_label[c])
+    yellow_sel = st.multiselect("🟡 Шар (дунд уналт) сумд", vd_options,
+                                key='vd_yellow_codes', format_func=lambda c: vd_label[c])
+
+    if st.button("🔄 Reset (анхны жагсаалт)"):
+        ssx['_vd_reset'] = True
+        st.rerun()
+
+    # Засварласан жагсаалтаас өнгөний толь (улаан давамгайлна)
+    vmap = {c: 'Шар' for c in yellow_sel}
+    vmap.update({c: 'Улаан' for c in red_sel})
+    ssx['vdrop_map'] = vmap
+
+    vc1, vc2 = st.columns(2)
+    sel_red = vc1.checkbox(f"🔴 Улаан харуулах ({len(red_sel)})", value=True, key="vd_show_red")
+    sel_yellow = vc2.checkbox(f"🟡 Шар харуулах ({len(yellow_sel)})", value=True, key="vd_show_yellow")
+    ssx['vdrop_colors'] = (
+        ({'Улаан'} if sel_red else set()) | ({'Шар'} if sel_yellow else set()))
 
 # --- Дэлгэрэнгүй (сум сонгох) ---
 with tab_detail:
@@ -240,6 +291,9 @@ with tab_milp:
         st.dataframe(dfm, width='stretch', hide_index=True)
         st.download_button("⬇️ MILP үр дүн (CSV)", dfm.to_csv(index=False).encode('utf-8-sig'),
                            "milp_results.csv", "text/csv")
+
+        st.caption("🔴🟡 Хүчдэлийн уналттай сумдын жагсаалтыг **📋 Сүлжээний хүснэгт** "
+                   "табаас засварлана.")
     else:
         st.info("Дээрх товчийг дарж оновчлолыг эхлүүлнэ үү.")
 
@@ -250,10 +304,33 @@ with tab_stations:
         st.info("Эхлээд **⚡ MILP оновчлол** табд оновчлолыг ажиллуулна уу.")
     else:
         node_info = analysis['node_info']
+        vcode = st.session_state.get('vdrop_map')
+        if vcode is None:
+            vcode, _ = get_voltage_drop()  # Хүснэгт таб нээгээгүй бол файлын анхны жагсаалт
+        vdrop_colors = st.session_state.get('vdrop_colors', {'Улаан', 'Шар'})
+
+        # Сонгосон өнгөтэй уналттай сумдын олонлог
+        red_listed = {c for c, v in vcode.items() if v == 'Улаан'} if 'Улаан' in vdrop_colors else set()
+        yellow_listed = {c for c, v in vcode.items() if v == 'Шар'} if 'Шар' in vdrop_colors else set()
+
+        # ≤35кВ-ээр шууд холбогдсон хөршүүд
+        from collections import defaultdict as _dd
+        neigh35 = _dd(set)
+        for (na, nb), (nkv, nln) in build_line_edges(lines).items():
+            if nkv is not None and nkv <= 35:
+                neigh35[na].add(nb)
+
+        MIN_PV_KW = 500.0  # 500кВт-аас бага станц харуулахгүй
+
         stations = []
         for r in milp['results']:
             for code, sz in r['sizing'].items():
-                if sz['pv_kw'] <= 0 and sz['batt_kwh'] <= 0:
+                if sz['pv_kw'] < MIN_PV_KW:           # 500кВт босго
+                    continue
+                # ДҮРЭМ: уналттай сумтай ≤35кВ-ээр ШУУД холбогдсон (өөрөө эсвэл хөрш)
+                red_conn = (code in red_listed) or any(n in red_listed for n in neigh35[code])
+                yellow_conn = (code in yellow_listed) or any(n in yellow_listed for n in neigh35[code])
+                if not (red_conn or yellow_conn):
                     continue
                 info = node_info.get(code, {})
                 stations.append({
@@ -261,9 +338,13 @@ with tab_stations:
                     'lat': info.get('lat'), 'lon': info.get('lon'),
                     'pv_kw': sz['pv_kw'], 'batt_kwh': sz['batt_kwh'], 'batt_kw': sz['batt_kw'],
                     'lcoe': r['lcoe'], 'network': node_info.get(r['slack'], {}).get('name', r['slack']),
+                    'vdrop': 'Улаан' if red_conn else 'Шар',
                 })
         station_by_code = {s['code']: s for s in stations}
         all_codes = sorted(station_by_code, key=lambda c: -station_by_code[c]['pv_kw'])
+
+        st.caption("Уналттай сумтай **≤35кВ-ээр шууд холбогдсон**, нарны чадал "
+                   "**≥500 кВт** станцуудыг харуулж байна.")
 
         # --- Сонголтын төлөв (унтраалттай станцууд + undo/redo түүх) ---
         ss = st.session_state
@@ -321,6 +402,7 @@ with tab_stations:
         if shown_codes:
             srows = [{
                 "Станц": station_by_code[c]['name'], "Код": c,
+                "Уналт": station_by_code[c].get('vdrop', '—'),
                 "Нарны чадал (кВт)": round(station_by_code[c]['pv_kw'], 0),
                 "Батарей (кВт·ц)": round(station_by_code[c]['batt_kwh'], 0),
                 "Батарей чадал (кВт)": round(station_by_code[c]['batt_kw'], 0),
