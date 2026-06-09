@@ -22,6 +22,8 @@ from profiles import SEASONS
 
 PVGIS_URL = "https://re.jrc.ec.europa.eu/api/v5_2/seriescalc"
 CACHE_PATH = "pvgis_cache.json"
+STATIC_PATH = "pvgis_data.json"   # build_pvgis_cache.py-аар нэг удаа үүсгэсэн статик өгөгдөл
+ROUND_DEG = 1                     # координат бүлэглэх нарийвчлал (0.1°)
 
 # Монголд тохирсон улирлын нарны эрчим (кВт·ц/кВт/өдөр, офлайн загварт)
 SEASON_PSH = {'Өвөл': 2.8, 'Хавар': 4.8, 'Зун': 6.0, 'Намар': 4.0}
@@ -107,25 +109,29 @@ def _save_cache(cache, path):
         pass
 
 
-def seasonal_solar_profiles(lat, lon, use_api=False, cache_path=CACHE_PATH, round_deg=1):
-    """
-    {season: [24 CF]} буцаана. Эхлээд кэшээс, дараа нь (use_api үед) PVGIS-аас,
-    эс бөгөөс офлайн загвараас. Кэш нь координатыг round_deg орон хүртэл бүлэглэнэ.
-    """
-    key = f"{round(lat, round_deg)},{round(lon, round_deg)}"
-    cache = _load_cache(cache_path)
-    if key in cache:
-        return {s: cache[key][s] for s in SEASONS}
+_STATIC = None
 
-    profiles = None
+
+def _get_static(path=STATIC_PATH):
+    """Урьдчилан татсан PVGIS статик өгөгдлийг нэг удаа ачаалж кэшэлнэ."""
+    global _STATIC
+    if _STATIC is None:
+        _STATIC = _load_cache(path)
+    return _STATIC
+
+
+def seasonal_solar_profiles(lat, lon, use_api=False):
+    """
+    {season: [24 CF]} буцаана.
+      use_api=True : дотоод статик файлаас (build_pvgis_cache.py-аар татсан PVGIS).
+                     Тухайн цэг файлд байхгүй бол офлайн загвар руу шилжинэ.
+      use_api=False: офлайн (синтетик) загвар.
+    Үндсэн апп ШУУД PVGIS API руу хандахгүй (хугацаа/нөөц хэмнэх).
+    """
     if use_api:
-        try:
-            profiles = fetch_pvgis_hourly(round(lat, round_deg), round(lon, round_deg))
-        except Exception:
-            profiles = None
-    if profiles is None:
-        profiles = synthetic_solar_profiles(lat)
-    else:
-        cache[key] = profiles
-        _save_cache(cache, cache_path)
-    return profiles
+        data = _get_static()
+        key = f"{round(lat, ROUND_DEG)},{round(lon, ROUND_DEG)}"
+        if key in data:
+            return {s: data[key][s] for s in SEASONS}
+        # Статик файлд байхгүй бол — синтетик нөөц
+    return synthetic_solar_profiles(lat)
