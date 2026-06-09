@@ -159,7 +159,7 @@ c4.metric("Нийт ачаалал", f"{s['total_load_kw']:,.0f} кВт")
 
 tab_map, tab_table, tab_detail, tab_milp, tab_stations = st.tabs(
     ["🗺️ Газрын зураг", "📋 Сүлжээний хүснэгт", "🔍 Дэлгэрэнгүй",
-     "⚡ MILP оновчлол", "🏭 Станц сонголт"])
+     "⚡ MILP оновчлол", "☀️ Станц сонголт"])
 
 # --- Газрын зураг ---
 with tab_map:
@@ -384,7 +384,7 @@ with tab_milp:
 
         node_info = analysis['node_info']
         st.info("Станцуудыг газрын зураг дээр сонгож асаах/унтраах, дэлгэрэнгүй "
-                "жагсаалтыг **🏭 Станц сонголт** табаас үзнэ үү.")
+                "жагсаалтыг **☀️ Станц сонголт** табаас үзнэ үү.")
         rows = []
         for r in milp['results']:
             comp = r['component']
@@ -431,6 +431,12 @@ with tab_milp:
 
 # --- Станц сонголт (асаах/унтраах + сонгосны дэлгэрэнгүй жагсаалт) ---
 with tab_stations:
+    # Хуудасны дээд талын лого (icon1.png)
+    lg1, lg2 = st.columns([1, 7])
+    if os.path.exists("icon1.png"):
+        lg1.image("icon1.png", width=72)
+    lg2.markdown("### Станцын сонголт")
+
     milp = st.session_state.get('milp')
     if not milp:
         st.info("Эхлээд **⚡ MILP оновчлол** табд оновчлолыг ажиллуулна уу.")
